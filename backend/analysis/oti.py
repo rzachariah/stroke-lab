@@ -14,16 +14,38 @@ from typing import Optional
 from .pose import PoseSequence, Frame
 
 
-def _angle_of_line(a: np.ndarray, b: np.ndarray) -> float:
-    """Angle in degrees of vector a→b relative to horizontal."""
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    return math.degrees(math.atan2(dy, dx))
+def _xz_angle_deg(v: np.ndarray) -> float:
+    """Angle of a 3D vector projected onto the horizontal (X-Z) plane, in degrees."""
+    return math.degrees(math.atan2(v[2], v[0]))
 
 
-def _angle_between(ax: np.ndarray, bx: np.ndarray) -> float:
-    """Signed angle difference between two line angles (in degrees)."""
-    diff = ax - bx
-    return (diff + 180) % 360 - 180
+def _x_factor_3d(frame: Frame) -> Optional[float]:
+    """
+    X-factor: angle between the shoulder axis and hip axis in the horizontal plane,
+    computed from MediaPipe world landmarks (metric 3D, hip-centered).
+
+    In MediaPipe world coords: x = person's right, y = up, z = toward camera.
+    We project each axis onto the xz plane and measure the angle between them.
+    Returns a value in [0, 90] degrees. Returns None if landmarks are unavailable.
+    """
+    l_hip_w = frame.world("l_hip")
+    r_hip_w = frame.world("r_hip")
+    l_sh_w = frame.world("l_shoulder")
+    r_sh_w = frame.world("r_shoulder")
+
+    if any(v is None for v in [l_hip_w, r_hip_w, l_sh_w, r_sh_w]):
+        return None
+
+    hip_vec = r_hip_w - l_hip_w           # points toward person's right
+    sh_vec = r_sh_w - l_sh_w
+
+    hip_angle = _xz_angle_deg(hip_vec)
+    sh_angle = _xz_angle_deg(sh_vec)
+
+    diff = abs(sh_angle - hip_angle)
+    if diff > 180:
+        diff = 360 - diff
+    return min(diff, 90.0)
 
 
 def _knee_bend_angle(frame: Frame, side: str) -> Optional[float]:
@@ -42,9 +64,7 @@ def _knee_bend_angle(frame: Frame, side: str) -> Optional[float]:
 @dataclass
 class FrameMetrics:
     time_sec: float
-    hip_angle: Optional[float] = None        # hip line angle (degrees, relative to horizontal)
-    shoulder_angle: Optional[float] = None   # shoulder line angle
-    x_factor: Optional[float] = None         # shoulder - hip angle (separation)
+    x_factor: Optional[float] = None         # 3D shoulder-hip yaw separation, [0, 90]°
     l_knee_bend: Optional[float] = None      # 180 = straight, <160 = good coil
     r_knee_bend: Optional[float] = None
     wrist_x_rel: Optional[float] = None      # wrist x relative to front hip (normalized)
@@ -122,19 +142,7 @@ def compute_oti_metrics(seq: PoseSequence, player_side: str = "r") -> OTIReport:
     for frame in seq.frames:
         fm = FrameMetrics(time_sec=frame.time_sec)
 
-        l_hip = frame.pt("l_hip")
-        r_hip = frame.pt("r_hip")
-        l_sh = frame.pt("l_shoulder")
-        r_sh = frame.pt("r_shoulder")
-
-        if l_hip is not None and r_hip is not None:
-            fm.hip_angle = _angle_of_line(l_hip, r_hip)
-
-        if l_sh is not None and r_sh is not None:
-            fm.shoulder_angle = _angle_of_line(l_sh, r_sh)
-
-        if fm.hip_angle is not None and fm.shoulder_angle is not None:
-            fm.x_factor = abs(_angle_between(fm.shoulder_angle, fm.hip_angle))
+        fm.x_factor = _x_factor_3d(frame)
 
         fm.l_knee_bend = _knee_bend_angle(frame, "l")
         fm.r_knee_bend = _knee_bend_angle(frame, "r")
@@ -147,12 +155,12 @@ def compute_oti_metrics(seq: PoseSequence, player_side: str = "r") -> OTIReport:
 
         report.frames.append(fm)
 
-    # Peak X-factor
-    xf_frames = [(i, f) for i, f in enumerate(report.frames) if f.x_factor is not None]
-    if xf_frames:
-        peak_i, peak_f = max(xf_frames, key=lambda t: t[1].x_factor)
-        report.peak_x_factor = round(peak_f.x_factor, 1)
-        report.peak_x_factor_time = round(peak_f.time_sec, 2)
+    # Peak X-factor — use 95th percentile to exclude bad detection frames
+    xf_vals = sorted((f.x_factor, f.time_sec) for f in report.frames if f.x_factor is not None)
+    if xf_vals:
+        p95_idx = int(len(xf_vals) * 0.95)
+        report.peak_x_factor = round(xf_vals[p95_idx][0], 1)
+        report.peak_x_factor_time = round(xf_vals[p95_idx][1], 2)
 
     # Min knee bend (deepest coil)
     knee_vals = []
@@ -177,7 +185,7 @@ def compute_oti_metrics(seq: PoseSequence, player_side: str = "r") -> OTIReport:
     if report.min_knee_bend is not None:
         report.leg_score = round(max(0, min(10, (170 - report.min_knee_bend) / 3)), 1)
 
-    # Shoulder/X-factor score: 10 = X-factor > 45°, 0 = < 10°
+    # Shoulder/X-factor score: 10 = X-factor >= 45°, 5 = ~27°, 0 = <= 10°
     if report.peak_x_factor is not None:
         report.shoulder_score = round(max(0, min(10, (report.peak_x_factor - 10) / 3.5)), 1)
 

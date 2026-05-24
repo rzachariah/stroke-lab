@@ -24,7 +24,8 @@ L = {
 class Frame:
     index: int
     time_sec: float
-    landmarks: Optional[dict] = None  # name -> (x, y, z, visibility)
+    landmarks: Optional[dict] = None       # name -> (x, y, z, visibility)  — normalized image coords
+    world_landmarks: Optional[dict] = None # name -> (x, y, z, visibility)  — metric 3D, hip-centered
     width: int = 0
     height: int = 0
 
@@ -37,11 +38,13 @@ class Frame:
             return None
         return np.array([lm[0] * self.width, lm[1] * self.height])
 
-    def pt3(self, name: str) -> Optional[np.ndarray]:
-        """Return (x, y, z) normalized coords."""
-        if self.landmarks is None:
+    def world(self, name: str) -> Optional[np.ndarray]:
+        """Return (x, y, z) world-space coords (meters, hip-centered).
+        x = person's right, y = up, z = toward camera.
+        Returns None if low visibility."""
+        if self.world_landmarks is None:
             return None
-        lm = self.landmarks.get(name)
+        lm = self.world_landmarks.get(name)
         if lm is None or lm[3] < 0.5:
             return None
         return np.array([lm[0], lm[1], lm[2]])
@@ -79,16 +82,23 @@ def extract_poses(video_path: str, sample_every_n: int = 1) -> PoseSequence:
                 results = pose.process(rgb)
 
                 landmarks = None
+                world_landmarks = None
                 if results.pose_landmarks:
                     landmarks = {}
                     for name, idx in L.items():
                         lm = results.pose_landmarks.landmark[idx]
                         landmarks[name] = (lm.x, lm.y, lm.z, lm.visibility)
+                if results.pose_world_landmarks:
+                    world_landmarks = {}
+                    for name, idx in L.items():
+                        lm = results.pose_world_landmarks.landmark[idx]
+                        world_landmarks[name] = (lm.x, lm.y, lm.z, lm.visibility)
 
                 seq.frames.append(Frame(
                     index=frame_idx,
                     time_sec=frame_idx / fps,
                     landmarks=landmarks,
+                    world_landmarks=world_landmarks,
                     width=width,
                     height=height,
                 ))
