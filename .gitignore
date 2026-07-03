@@ -13,5 +13,12 @@ mobile/dist/
 mobile/build/
 *.tsbuildinfo
 
+# Sample videos / inspection output (local testing only)
+backend/samples/
+backend/inspect_out/
+
+# Local tooling
+.claude/
+
 # OS
 .DS_Store

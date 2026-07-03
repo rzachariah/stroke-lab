@@ -56,18 +56,36 @@ class PoseSequence:
     fps: float = 30.0
 
 
-def extract_poses(video_path: str, sample_every_n: int = 1) -> PoseSequence:
+# Map the container's rotation metadata to a cv2 rotate code.
+# Phone videos commonly store a rotation flag that OpenCV does NOT auto-apply
+# (CAP_PROP_ORIENTATION_AUTO is a no-op on many builds), so MediaPipe would
+# otherwise analyze a sideways player and every angle metric would be invalid.
+_ROTATE_CODES = {
+    90: cv2.ROTATE_90_COUNTERCLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_CLOCKWISE,
+}
+
+
+def extract_poses(video_path: str, sample_every_n: int = 1,
+                  model_complexity: int = 2) -> PoseSequence:
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Apply container rotation metadata manually (see _ROTATE_CODES).
+    rotation = int(cap.get(cv2.CAP_PROP_ORIENTATION_META) or 0) % 360
+    rotate_code = _ROTATE_CODES.get(rotation)
+    if rotation in (90, 270):
+        width, height = height, width
 
     seq = PoseSequence(fps=fps)
     frame_idx = 0
 
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=2,
+        model_complexity=model_complexity,
         smooth_landmarks=True,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
@@ -76,6 +94,9 @@ def extract_poses(video_path: str, sample_every_n: int = 1) -> PoseSequence:
             ret, bgr = cap.read()
             if not ret:
                 break
+
+            if rotate_code is not None:
+                bgr = cv2.rotate(bgr, rotate_code)
 
             if frame_idx % sample_every_n == 0:
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
