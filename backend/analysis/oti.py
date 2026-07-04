@@ -130,6 +130,27 @@ def _wrist_trajectory_direction(frames: list[FrameMetrics]) -> str:
     return "neutral"
 
 
+def _sustained_peak(frames: list[FrameMetrics], w: int = 5,
+                    min_valid: int = 3) -> tuple[Optional[float], Optional[float]]:
+    """Largest X-factor the player *held*: the max over a centered rolling median
+    of the per-frame X-factor series. Robust to single-frame spikes that a raw
+    peak or high percentile would over-read. Returns (value, time) or (None, None).
+    """
+    xs = [f.x_factor for f in frames]
+    ts = [f.time_sec for f in frames]
+    half = w // 2
+    best_v = best_t = None
+    for i in range(len(xs)):
+        window = [xs[j] for j in range(max(0, i - half), min(len(xs), i + half + 1))
+                  if xs[j] is not None]
+        if len(window) < min_valid:
+            continue
+        m = float(np.median(window))
+        if best_v is None or m > best_v:
+            best_v, best_t = m, ts[i]
+    return best_v, best_t
+
+
 def compute_oti_metrics(seq: PoseSequence, player_side: str = "r") -> OTIReport:
     """
     player_side: "r" for right-handed (dominant = right), "l" for lefty.
@@ -155,12 +176,14 @@ def compute_oti_metrics(seq: PoseSequence, player_side: str = "r") -> OTIReport:
 
         report.frames.append(fm)
 
-    # Peak X-factor — use 95th percentile to exclude bad detection frames
-    xf_vals = sorted((f.x_factor, f.time_sec) for f in report.frames if f.x_factor is not None)
-    if xf_vals:
-        p95_idx = int(len(xf_vals) * 0.95)
-        report.peak_x_factor = round(xf_vals[p95_idx][0], 1)
-        report.peak_x_factor_time = round(xf_vals[p95_idx][1], 2)
+    # Peak X-factor — use the sustained peak (max of a rolling median), i.e. the
+    # largest separation the player actually HELD, not a single-frame spike. A raw
+    # peak / p95 over-reads jittery swings (a couple of noisy frames look like a
+    # great coil); a rolling median only rewards separation held across frames.
+    pk_v, pk_t = _sustained_peak(report.frames)
+    if pk_v is not None:
+        report.peak_x_factor = round(pk_v, 1)
+        report.peak_x_factor_time = round(pk_t, 2)
 
     # Min knee bend (deepest coil)
     knee_vals = []
